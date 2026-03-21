@@ -12,7 +12,13 @@ from docuware.const import ACCEPT_JSON, BASE_HEADERS
 
 log = logging.getLogger(__name__)
 
-__all__ = ["BearerAuth", "Authenticator", "OAuth2Authenticator", "TokenAuthenticator"]
+__all__ = [
+    "BearerAuth",
+    "Authenticator",
+    "ConnectedAppAuthenticator",
+    "OAuth2Authenticator",
+    "TokenAuthenticator",
+]
 
 
 class BearerAuth(httpx.Auth):
@@ -201,3 +207,82 @@ class TokenAuthenticator(Authenticator):
 
     def logoff(self, conn: types.ConnectionP) -> None:
         conn.session.auth = None  # type: ignore[assignment]
+
+
+class ConnectedAppAuthenticator(Authenticator):
+    """Authenticator for DocuWare Connected Apps (OAuth2 client_credentials grant).
+
+    This flow is used for server-to-server integrations where no interactive
+    user login is needed.  The Connected App must be registered in DocuWare
+    Configuration → Integrations and configured as a *Confidential* application
+    with the ``client_credentials`` grant type.
+
+    login()        — obtains an access token via client_credentials and sets the
+                     Bearer header.
+    authenticate() — called automatically on 401/403 to obtain a fresh token.
+
+    Args:
+        client_id:      OAuth2 client ID from the DocuWare Connected App.
+        client_secret:  OAuth2 client secret from the DocuWare Connected App.
+        scope:          OAuth2 scope(s) to request (default ``"docuware.platform"``).
+    """
+
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        scope: str = "docuware.platform",
+    ):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.scope = scope
+        self.token: Optional[str] = None
+
+    def _apply_access_token(self, conn: types.ConnectionP, token: Optional[str]) -> None:
+        conn.session.auth = BearerAuth(token) if token else None  # type: ignore[assignment]
+
+    def _get_access_token(self, conn: types.ConnectionP) -> str:
+        log.debug("Requesting access token via client_credentials")
+        # Step 1: Discover the Identity Service
+        res = self._get(conn, "/DocuWare/Platform/Home/IdentityServiceInfo")
+
+        # Step 2: Get the OpenID Connect configuration
+        path = (
+            f"{res.get('IdentityServiceUrl', '').rstrip('/')}/.well-known/openid-configuration"
+        )
+        res = self._get(conn, path)
+
+        # Step 3: Request an access token using client_credentials
+        path = res.get("token_endpoint") or "/DocuWare/Identity/connect/token"
+        data = {
+            "grant_type": "client_credentials",
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "scope": self.scope,
+        }
+        try:
+            result = self._post(conn, path, data=data)
+        except errors.ResourceError as exc:
+            if exc.status_code == 400:
+                raise errors.AccountError(
+                    "Login failed: invalid client_id or client_secret"
+                ) from exc
+            raise
+        token = result.get("access_token")
+        if not token:
+            raise errors.AccountError("No access token received")
+        return token
+
+    def authenticate(self, conn: types.ConnectionP) -> httpx.Client:
+        self._apply_access_token(conn, None)
+        self.token = self._get_access_token(conn)
+        self._apply_access_token(conn, self.token)
+        return conn.session
+
+    def login(self, conn: types.ConnectionP) -> None:
+        conn.session = self.authenticate(conn)
+
+    def logoff(self, conn: types.ConnectionP) -> None:
+        if self.token:
+            self.token = None
+            self._apply_access_token(conn, None)

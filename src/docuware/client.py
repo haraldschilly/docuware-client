@@ -8,6 +8,13 @@ from typing import Any, Callable, Dict, Iterator, Optional, Union
 
 from docuware import auth, conn, errors, organization, structs, types
 
+__all__ = [
+    "DocuwareClient",
+    "connect",
+    "connect_with_connected_app",
+    "connect_with_tokens",
+]
+
 log = logging.getLogger(__name__)
 
 
@@ -171,6 +178,49 @@ def connect_with_tokens(
         client_secret=client_secret,
         verify=verify_certificate,
         on_token_refresh=on_token_refresh,
+    )
+    client.conn.authenticator = authenticator
+    authenticator.login(client.conn)
+    res = client.conn.get_json("/DocuWare/Platform")
+    client.endpoints = structs.Endpoints(res)
+    client.resources = structs.Resources(res)
+    client.version = res.get("Version")
+    return client
+
+
+def connect_with_connected_app(
+    url: str,
+    client_id: str,
+    client_secret: str,
+    *,
+    scope: str = "docuware.platform",
+    verify_certificate: bool = True,
+    timeout: Optional[float] = None,
+) -> DocuwareClient:
+    """Connect to DocuWare using a Connected App (OAuth2 client_credentials grant).
+
+    This is intended for server-to-server integrations where no interactive
+    user login is required.  The Connected App must be registered in DocuWare
+    Configuration → Integrations as a *Confidential* application with the
+    ``client_credentials`` grant type.
+
+    Args:
+        url:                DocuWare Platform base URL.
+        client_id:          OAuth2 client ID from the DocuWare Connected App.
+        client_secret:      OAuth2 client secret from the DocuWare Connected App.
+        scope:              OAuth2 scope(s) to request (default ``"docuware.platform"``).
+        verify_certificate: Whether to verify TLS certificates (default True).
+        timeout:            Request timeout in seconds.  Defaults to the value of
+                            the ``DW_TIMEOUT`` environment variable, or 30 s if not set.
+
+    Returns:
+        Connected DocuwareClient instance.
+    """
+    client = DocuwareClient(url, verify_certificate=verify_certificate, timeout=timeout)
+    authenticator = auth.ConnectedAppAuthenticator(
+        client_id=client_id,
+        client_secret=client_secret,
+        scope=scope,
     )
     client.conn.authenticator = authenticator
     authenticator.login(client.conn)
